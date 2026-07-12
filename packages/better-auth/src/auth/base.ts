@@ -8,6 +8,7 @@ import {
 	resolveDynamicTrustedProxyHeaders,
 	resolveRequestContext,
 } from "../context/helpers";
+import { createBetterAuthServerAPI } from "../server";
 import type { Auth } from "../types";
 import { getBaseURL, getOrigin, isDynamicBaseURLConfig } from "../utils/url";
 
@@ -89,6 +90,7 @@ export const createBetterAuth = <Options extends BetterAuthOptions>(
 			return runWithAdapter(handlerCtx.adapter, () => handler(request));
 		},
 		api,
+		server: createBetterAuthServerAPI(authContext, options.plugins || []),
 		options: options,
 		$context: authContext,
 		$ERROR_CODES: {

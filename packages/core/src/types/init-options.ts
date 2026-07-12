@@ -462,6 +462,16 @@ export type BetterAuthOptions = {
 	 */
 	baseURL?: BaseURLConfig | undefined;
 	/**
+	 * Run Better Auth without requiring an HTTP-facing base URL.
+	 *
+	 * This is intended for trusted server-side or worker-only usage where the
+	 * auth instance is used as a library and URL-generating flows are not
+	 * available unless a URL is provided explicitly.
+	 *
+	 * @default false
+	 */
+	headless?: boolean | undefined;
+	/**
 	 * Base path for the Better Auth. This is typically
 	 * the path where the
 	 * Better Auth routes are mounted.

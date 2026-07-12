@@ -66,6 +66,8 @@ import type {
 	OrganizationSchema,
 	TeamMember,
 } from "./schema";
+import type { OrganizationServerPlugin } from "./server";
+import { createOrganizationServerAPI } from "./server";
 import type { OrganizationOptions } from "./types";
 
 declare module "@better-auth/core" {
@@ -105,7 +107,7 @@ export type DefaultOrganizationPlugin<Options extends OrganizationOptions> = {
 	};
 	$ERROR_CODES: typeof ORGANIZATION_ERROR_CODES;
 	options: NoInfer<Options>;
-};
+} & OrganizationServerPlugin<Options>;
 
 export interface OrganizationCreator {
 	<Options extends OrganizationOptions>(
@@ -319,7 +321,7 @@ export type OrganizationPlugin<O extends OrganizationOptions> = {
 	};
 	$ERROR_CODES: typeof ORGANIZATION_ERROR_CODES;
 	options: NoInfer<O>;
-};
+} & OrganizationServerPlugin<O>;
 
 /**
  * Organization plugin for Better Auth. Organization allows you to create teams, members,
@@ -371,7 +373,7 @@ export function organization<
 	};
 	$ERROR_CODES: typeof ORGANIZATION_ERROR_CODES;
 	options: NoInfer<O>;
-};
+} & OrganizationServerPlugin<O>;
 export function organization<
 	O extends OrganizationOptions & {
 		teams: { enabled: true };
@@ -405,7 +407,7 @@ export function organization<
 	};
 	$ERROR_CODES: typeof ORGANIZATION_ERROR_CODES;
 	options: NoInfer<O>;
-};
+} & OrganizationServerPlugin<O>;
 export function organization<
 	O extends OrganizationOptions & {
 		dynamicAccessControl: { enabled: true };
@@ -437,7 +439,7 @@ export function organization<
 	};
 	$ERROR_CODES: typeof ORGANIZATION_ERROR_CODES;
 	options: NoInfer<O>;
-};
+} & OrganizationServerPlugin<O>;
 export function organization<O extends OrganizationOptions>(
 	options?: O | undefined,
 ): DefaultOrganizationPlugin<O>;
@@ -1260,6 +1262,11 @@ export function organization<O extends OrganizationOptions>(options?: O) {
 							};
 						},
 			},
+		},
+		server(_ctx, { run }) {
+			return {
+				organization: createOrganizationServerAPI(opts, run),
+			};
 		},
 		$Infer: {
 			Organization: {} as InferOrganization<O>,

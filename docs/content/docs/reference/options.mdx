@@ -72,6 +72,53 @@ When `crossSubDomainCookies` is enabled, the cookie domain is derived from the r
 
 For deployment patterns and end-to-end examples, see the [Dynamic Base URL guide](/docs/guides/dynamic-base-url).
 
+## `headless`
+
+Run Better Auth without requiring an HTTP-facing `baseURL`.
+
+Use this when the auth instance is used from trusted server-side code, such as workers, queues, scheduled jobs, or internal services, and you do not mount the Better Auth HTTP handler.
+
+```ts
+import { betterAuth } from "better-auth";
+
+export const auth = betterAuth({
+	headless: true,
+	database,
+	secret: process.env.BETTER_AUTH_SECRET,
+})
+```
+
+Headless mode does not create an ambient current user. Request-scoped APIs still require request headers or an explicit session token. For trusted server-side user work, use the server API:
+
+```ts
+const accounts = await auth.server.getUser(userId).listAccounts();
+const session = await auth.server.getUser(userId).createSession();
+const resolved = await auth.server.session(session.token).get();
+```
+
+Plugins can expose their own trusted server APIs. For example, when the admin plugin is configured:
+
+```ts
+import { admin } from "better-auth/plugins";
+
+export const auth = betterAuth({
+	headless: true,
+	plugins: [admin()],
+})
+
+const { user } = await auth.server.admin.createUser({
+	email: "user@example.com",
+	name: "User",
+})
+
+await auth.server.admin.setRole({
+	userId: user.id,
+	role: "admin",
+})
+```
+
+URL-generating flows such as OAuth callbacks, magic links, email verification, and password reset links still need a public URL when used.
+
 ## `basePath`
 
 Base path for Better Auth. This is typically the path where the Better Auth routes are mounted. It will be overridden if there is a path component within `baseURL`.

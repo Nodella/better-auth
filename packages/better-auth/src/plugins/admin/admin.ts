@@ -24,6 +24,7 @@ import {
 	userHasPermission,
 } from "./routes";
 import { schema } from "./schema";
+import { createAdminServerAPI } from "./server";
 import type {
 	AdminOptions,
 	SessionWithImpersonatedBy,
@@ -163,6 +164,11 @@ export const admin = <O extends AdminOptions>(options?: O | undefined) => {
 			removeUser: removeUser(opts),
 			setUserPassword: setUserPassword(opts),
 			userHasPermission: userHasPermission(opts as O),
+		},
+		server(_ctx, { run }) {
+			return {
+				admin: createAdminServerAPI(opts, run),
+			};
 		},
 		$ERROR_CODES: ADMIN_ERROR_CODES,
 		schema: mergeSchema(schema, opts.schema),

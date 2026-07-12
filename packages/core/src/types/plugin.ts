@@ -58,6 +58,22 @@ export type BetterAuthPlugin = BetterAuthPluginErrorCodePart & {
 				[key: string]: Endpoint;
 		  }
 		| undefined;
+	/**
+	 * Trusted server-side APIs exposed under `auth.server`.
+	 *
+	 * These APIs are intended for headless/server-only usage and should not rely
+	 * on request headers, cookies, CSRF, or ambient session state.
+	 */
+	server?:
+		| ((
+				ctx: Promise<AuthContext>,
+				helpers: {
+					run: <Result>(
+						fn: (ctx: AuthContext) => Awaitable<Result>,
+					) => Promise<Result>;
+				},
+		  ) => Record<string, unknown>)
+		| undefined;
 	middlewares?:
 		| {
 				path: string;

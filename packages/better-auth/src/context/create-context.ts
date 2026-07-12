@@ -148,7 +148,7 @@ export async function createAuthContext<Options extends BetterAuthOptions>(
 				options.basePath,
 			);
 
-	if (!baseURL && !isDynamicConfig) {
+	if (!baseURL && !isDynamicConfig && !options.headless) {
 		logger.warn(
 			`[better-auth] Base URL is not set. Set the baseURL option or BETTER_AUTH_URL env, or use a dynamic baseURL with allowedHosts for multi-host setups. Without it the origin is derived from the incoming request, and callbacks and redirects may not work correctly.`,
 		);

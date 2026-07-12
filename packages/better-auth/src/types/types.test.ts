@@ -157,6 +157,35 @@ describe("general types", async () => {
 		expectTypeOf<typeof auth.api>().not.toHaveProperty("testNonAction");
 	});
 
+	it("should infer plugin server APIs", async () => {
+		const { auth } = await getTestInstance({
+			plugins: [admin()],
+		});
+		const { auth: orgAuth } = await getTestInstance({
+			plugins: [organization()],
+		});
+		const { auth: teamOrgAuth } = await getTestInstance({
+			plugins: [organization({ teams: { enabled: true } })],
+		});
+		const { auth: baseAuth } = await getTestInstance();
+
+		expectTypeOf<typeof auth.server>().toHaveProperty("admin");
+		expectTypeOf<typeof auth.server.admin.getUser>().toBeFunction();
+		expectTypeOf<typeof orgAuth.server>().toHaveProperty("organization");
+		expectTypeOf<
+			typeof orgAuth.server.organization.createOrganization
+		>().toBeFunction();
+		expectTypeOf<typeof teamOrgAuth.server.organization>().toHaveProperty(
+			"createTeam",
+		);
+		expectTypeOf<
+			"admin" extends keyof typeof baseAuth.server ? true : false
+		>().toEqualTypeOf<false>();
+		expectTypeOf<
+			"organization" extends keyof typeof baseAuth.server ? true : false
+		>().toEqualTypeOf<false>();
+	});
+
 	/**
 	 * `Auth<O>["api"].getSession` must remain callable from a generic context.
 	 * Changing this contract is a breaking change for downstream consumers.

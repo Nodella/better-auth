@@ -29,3 +29,9 @@ export type * from "better-call";
 export type { JSONWebKeySet, JWTPayload } from "jose";
 export type * from "zod";
 export { APIError } from "./api";
+export type {
+	BetterAuthServerAPI,
+	BetterAuthServerCoreAPI,
+	BetterAuthServerSessionAPI,
+	BetterAuthServerUserAPI,
+} from "./server";
