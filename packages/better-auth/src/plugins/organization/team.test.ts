@@ -308,6 +308,23 @@ describe("team", async () => {
 		expect(updatedTeam.data?.name).toBe("Updated Team Name");
 		expect(updatedTeam.data?.id).toBe(newTeamId);
 		expect(updatedTeam.data?.organizationId).toBe(newOrgId);
+
+		const mismatchedUpdate = await client.organization.updateTeam({
+			teamId: newTeamId,
+			data: {
+				name: "Wrong Organization",
+				organizationId,
+			},
+			fetchOptions: { headers },
+		});
+		expect(mismatchedUpdate.error?.code).toBe("TEAM_NOT_FOUND");
+
+		const mismatchedDelete = await client.organization.removeTeam({
+			teamId: newTeamId,
+			organizationId,
+			fetchOptions: { headers },
+		});
+		expect(mismatchedDelete.error?.code).toBe("TEAM_NOT_FOUND");
 	});
 
 	it("should add and remove team member with explicit organizationId", async () => {

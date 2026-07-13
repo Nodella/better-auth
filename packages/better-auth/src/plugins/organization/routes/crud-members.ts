@@ -1,22 +1,22 @@
 import type { LiteralString } from "@better-auth/core";
 import { createAuthEndpoint } from "@better-auth/core/api";
 import { whereOperators } from "@better-auth/core/db/adapter";
-import { APIError, BASE_ERROR_CODES } from "@better-auth/core/error";
+import { APIError } from "@better-auth/core/error";
 import * as z from "zod";
 import { getSessionFromCtx, sessionMiddleware } from "../../../api";
 import type { InferAdditionalFieldsFromPluginOptions } from "../../../db";
 import { toZodSchema } from "../../../db/to-zod";
 import { defaultRoles } from "../access/statement";
-import { getOrgAdapter, resolveMaximumMembersPerTeam } from "../adapter";
+import { getOrgAdapter } from "../adapter";
 import { orgMiddleware, orgSessionMiddleware } from "../call";
 import { ORGANIZATION_ERROR_CODES } from "../error-codes";
 import { hasPermission } from "../has-permission";
-import { parseRoles } from "../organization";
 import type {
 	InferMember,
 	InferOrganizationRolesFromOption,
 	Member,
 } from "../schema";
+import { bindOrganizationOperations } from "../server";
 import type { OrganizationOptions } from "../types";
 
 const baseMemberSchema = z.object({
@@ -101,146 +101,27 @@ export const addMember = <O extends OrganizationOptions>(option: O) => {
 				});
 			}
 
-			const adapter = getOrgAdapter<O>(ctx.context, option);
-
-			const user = await ctx.context.internalAdapter.findUserById(
-				ctx.body.userId,
-			);
-
-			if (!user) {
-				throw APIError.from("BAD_REQUEST", BASE_ERROR_CODES.USER_NOT_FOUND);
-			}
-
-			const alreadyMember = await adapter.findMemberByEmail({
-				email: user.email,
-				organizationId: orgId,
-			});
-
-			if (alreadyMember) {
-				throw APIError.from(
-					"BAD_REQUEST",
-					ORGANIZATION_ERROR_CODES.USER_IS_ALREADY_A_MEMBER_OF_THIS_ORGANIZATION,
-				);
-			}
-
-			if (teamId) {
-				const team = await adapter.findTeamById({
-					teamId,
-					organizationId: orgId,
-				});
-				if (!team || team.organizationId !== orgId) {
-					throw APIError.from(
-						"BAD_REQUEST",
-						ORGANIZATION_ERROR_CODES.TEAM_NOT_FOUND,
-					);
-				}
-			}
-
-			const membershipLimit = ctx.context.orgOptions?.membershipLimit || 100;
-			const count = await adapter.countMembers({ organizationId: orgId });
-
-			const organization = await adapter.findOrganizationById(orgId);
-			if (!organization) {
-				throw APIError.from(
-					"BAD_REQUEST",
-					ORGANIZATION_ERROR_CODES.ORGANIZATION_NOT_FOUND,
-				);
-			}
-
-			const limit =
-				typeof membershipLimit === "number"
-					? membershipLimit
-					: await membershipLimit(user, organization);
-
-			if (count >= limit) {
-				throw APIError.from(
-					"FORBIDDEN",
-					ORGANIZATION_ERROR_CODES.ORGANIZATION_MEMBERSHIP_LIMIT_REACHED,
-				);
-			}
-
-			const {
-				role: _,
-				userId: __,
-				organizationId: ___,
-				...additionalFields
-			} = ctx.body;
-
-			let memberData = {
-				organizationId: orgId,
-				userId: user.id,
-				role: parseRoles(ctx.body.role),
-				createdAt: new Date(),
-				...(additionalFields ? additionalFields : {}),
+			const body = ctx.body as typeof ctx.body & {
+				teamId?: string | undefined;
 			};
-
-			// Run beforeAddMember hook
-			if (option?.organizationHooks?.beforeAddMember) {
-				const response = await option?.organizationHooks.beforeAddMember({
-					member: {
-						userId: user.id,
-						organizationId: orgId,
-						role: parseRoles(ctx.body.role as string | string[]),
-						...additionalFields,
-					},
-					user,
-					organization,
-				});
-				if (response && typeof response === "object" && "data" in response) {
-					memberData = {
-						...memberData,
-						...response.data,
-					};
-				}
-			}
-
-			const maximumMembersPerTeam = teamId
-				? await resolveMaximumMembersPerTeam(ctx.context.orgOptions.teams, {
-						teamId,
-						organizationId: orgId,
-						session,
-					})
-				: undefined;
-
-			// Charge team capacity before creating the organization member so a full
-			// team rejects the request before any row is written.
-			// FIXME(team-add-atomicity): addTeamMemberWithLimit commits on its own
-			// transaction, so on adapters without isolated transactions a later
-			// createMember failure can orphan the teamMember row. Same residual as
-			// acceptInvitation; closed by the planned isolated-transaction adapter
-			// contract.
-			if (teamId) {
-				if (maximumMembersPerTeam !== undefined) {
-					const result = await adapter.addTeamMemberWithLimit({
-						teamId,
-						userId: user.id,
-						maximumMembersPerTeam,
-					});
-					if (result.status === "limitReached") {
-						throw APIError.from(
-							"FORBIDDEN",
-							ORGANIZATION_ERROR_CODES.TEAM_MEMBER_LIMIT_REACHED,
-						);
-					}
-				} else {
-					await adapter.findOrCreateTeamMember({
-						userId: user.id,
-						teamId,
-					});
-				}
-			}
-
-			const createdMember = await adapter.createMember(memberData);
-
-			// Run afterAddMember hook
-			if (option?.organizationHooks?.afterAddMember) {
-				await option?.organizationHooks.afterAddMember({
-					member: createdMember,
-					user,
-					organization,
-				});
-			}
-
+			const {
+				role,
+				userId,
+				organizationId: _,
+				teamId: __,
+				...additionalFields
+			} = body;
+			const createdMember = await bindOrganizationOperations(
+				option,
+				ctx.context,
+				{ session, endpointContext: ctx },
+			).addMember({
+				organizationId: orgId,
+				userId,
+				role,
+				teamId,
+				data: additionalFields,
+			});
 			return ctx.json(createdMember);
 		},
 	);
@@ -405,35 +286,12 @@ export const removeMember = <O extends OrganizationOptions>(options: O) =>
 				);
 			}
 
-			const organization = await adapter.findOrganizationById(organizationId);
-			if (!organization) {
-				throw APIError.from(
-					"BAD_REQUEST",
-					ORGANIZATION_ERROR_CODES.ORGANIZATION_NOT_FOUND,
-				);
-			}
-
-			const userBeingRemoved = await ctx.context.internalAdapter.findUserById(
-				toBeRemovedMember.userId,
-			);
-			if (!userBeingRemoved) {
-				throw APIError.fromStatus("BAD_REQUEST", {
-					message: "User not found",
-				});
-			}
-
-			// Run beforeRemoveMember hook
-			if (options?.organizationHooks?.beforeRemoveMember) {
-				await options?.organizationHooks.beforeRemoveMember({
-					member: toBeRemovedMember,
-					user: userBeingRemoved,
-					organization,
-				});
-			}
-			await adapter.deleteMember({
+			const result = await bindOrganizationOperations(options, ctx.context, {
+				session,
+				endpointContext: ctx,
+			}).removeMember({
+				organizationId,
 				memberId: toBeRemovedMember.id,
-				organizationId: organizationId,
-				userId: toBeRemovedMember.userId,
 			});
 			if (
 				session.user.id === toBeRemovedMember.userId &&
@@ -443,18 +301,7 @@ export const removeMember = <O extends OrganizationOptions>(options: O) =>
 				await adapter.setActiveOrganization(session.session.token, null, ctx);
 			}
 
-			// Run afterRemoveMember hook
-			if (options?.organizationHooks?.afterRemoveMember) {
-				await options?.organizationHooks.afterRemoveMember({
-					member: toBeRemovedMember,
-					user: userBeingRemoved,
-					organization,
-				});
-			}
-
-			return ctx.json({
-				member: toBeRemovedMember,
-			});
+			return ctx.json(result);
 		},
 	);
 
@@ -700,84 +547,14 @@ export const updateMemberRole = <O extends OrganizationOptions>(option: O) =>
 				);
 			}
 
-			const organization = await adapter.findOrganizationById(organizationId);
-			if (!organization) {
-				throw APIError.from(
-					"BAD_REQUEST",
-					ORGANIZATION_ERROR_CODES.ORGANIZATION_NOT_FOUND,
-				);
-			}
-
-			const userBeingUpdated = await ctx.context.internalAdapter.findUserById(
-				toBeUpdatedMember.userId,
-			);
-			if (!userBeingUpdated) {
-				throw APIError.fromStatus("BAD_REQUEST", {
-					message: "User not found",
-				});
-			}
-
-			const previousRole = toBeUpdatedMember.role;
-			const newRole = parseRoles(roleToSet);
-
-			// Run beforeUpdateMemberRole hook
-			if (option?.organizationHooks?.beforeUpdateMemberRole) {
-				const response = await option?.organizationHooks.beforeUpdateMemberRole(
-					{
-						member: toBeUpdatedMember,
-						newRole,
-						user: userBeingUpdated,
-						organization,
-					},
-				);
-				if (response && typeof response === "object" && "data" in response) {
-					// Allow the hook to modify the role
-					const updatedMember = await adapter.updateMember(
-						ctx.body.memberId,
-						response.data.role || newRole,
-					);
-					if (!updatedMember) {
-						throw APIError.from(
-							"BAD_REQUEST",
-							ORGANIZATION_ERROR_CODES.MEMBER_NOT_FOUND,
-						);
-					}
-
-					// Run afterUpdateMemberRole hook
-					if (option?.organizationHooks?.afterUpdateMemberRole) {
-						await option?.organizationHooks.afterUpdateMemberRole({
-							member: updatedMember,
-							previousRole,
-							user: userBeingUpdated,
-							organization,
-						});
-					}
-
-					return ctx.json(updatedMember);
-				}
-			}
-
-			const updatedMember = await adapter.updateMember(
-				ctx.body.memberId,
-				newRole,
-			);
-			if (!updatedMember) {
-				throw APIError.from(
-					"BAD_REQUEST",
-					ORGANIZATION_ERROR_CODES.MEMBER_NOT_FOUND,
-				);
-			}
-
-			// Run afterUpdateMemberRole hook
-			if (option?.organizationHooks?.afterUpdateMemberRole) {
-				await option?.organizationHooks.afterUpdateMemberRole({
-					member: updatedMember,
-					previousRole,
-					user: userBeingUpdated,
-					organization,
-				});
-			}
-
+			const updatedMember = await bindOrganizationOperations(
+				option,
+				ctx.context,
+				{ session, endpointContext: ctx },
+			).updateMember({
+				memberId: ctx.body.memberId,
+				role: roleToSet,
+			});
 			return ctx.json(updatedMember);
 		},
 	);
@@ -1018,7 +795,11 @@ export const listMembers = <O extends OrganizationOptions>(options: O) =>
 					ORGANIZATION_ERROR_CODES.YOU_ARE_NOT_A_MEMBER_OF_THIS_ORGANIZATION,
 				);
 			}
-			const { members, total } = await adapter.listMembers({
+			const { members, total } = await bindOrganizationOperations(
+				options,
+				ctx.context,
+				{ session, endpointContext: ctx },
+			).listMembers({
 				organizationId,
 				limit: ctx.query?.limit ? Number(ctx.query.limit) : undefined,
 				offset: ctx.query?.offset ? Number(ctx.query.offset) : undefined,

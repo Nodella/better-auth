@@ -1,7 +1,13 @@
-import type { AuthContext } from "@better-auth/core";
+import type { AuthContext, GenericEndpointContext } from "@better-auth/core";
+import {
+	getCurrentAdapter,
+	runWithTransaction,
+} from "@better-auth/core/context";
+import type { WhereOperator } from "@better-auth/core/db/adapter";
 import { APIError, BASE_ERROR_CODES } from "@better-auth/core/error";
 import * as z from "zod";
-import type { User } from "../../types";
+import type { Session, User } from "../../types";
+import { getDate } from "../../utils/date";
 import { defaultRoles } from "./access";
 import { getOrgAdapter, resolveMaximumMembersPerTeam } from "./adapter";
 import { ORGANIZATION_ERROR_CODES } from "./error-codes";
@@ -21,17 +27,27 @@ export type OrganizationServerRun = <Result>(
 	fn: (ctx: AuthContext) => Result | Promise<Result>,
 ) => Promise<Result>;
 
+export type OrganizationOperationContext = {
+	session?: { user: User; session: Session } | null | undefined;
+	endpointContext?: GenericEndpointContext | undefined;
+};
+
 type ServerUser = User & Record<string, unknown>;
 type ServerOrganization = Organization & Record<string, unknown>;
 type ServerMember = Member & Record<string, unknown>;
 type ServerInvitation = Invitation & Record<string, unknown>;
 type ServerTeam = Team & Record<string, unknown>;
 
-type ServerMemberRow<O extends OrganizationOptions> = Member &
+type ServerMemberRow<O extends OrganizationOptions> = Omit<
+	InferMember<O>,
+	"user"
+> &
 	(O["teams"] extends { enabled: true }
 		? { teamId?: string | undefined }
 		: {}) &
 	Record<string, unknown>;
+
+type ServerMemberWithUser<O extends OrganizationOptions> = InferMember<O>;
 
 type OrganizationAdapter<O extends OrganizationOptions> = ReturnType<
 	typeof getOrgAdapter<O>
@@ -87,7 +103,7 @@ type ListMembersInput = OrganizationIdInput & {
 	filter?:
 		| {
 				field: string;
-				operator?: "eq" | "ne" | "lt" | "lte" | "gt" | "gte" | "in";
+				operator?: WhereOperator | undefined;
 				value: unknown;
 		  }
 		| undefined;
@@ -137,6 +153,7 @@ type GetTeamInput = {
 
 type UpdateTeamInput = {
 	teamId: string;
+	organizationId?: string | undefined;
 	userId?: string | undefined;
 	data: {
 		name?: string | undefined;
@@ -148,21 +165,22 @@ type UpdateTeamInput = {
 
 type DeleteTeamInput = {
 	teamId: string;
+	organizationId?: string | undefined;
 	userId?: string | undefined;
+};
+
+type OrganizationTeamOperationsAPI<O extends OrganizationOptions> = {
+	createTeam: (input: CreateTeamInput) => Promise<InferTeam<O>>;
+	getTeam: (input: GetTeamInput) => Promise<InferTeam<O> | null>;
+	updateTeam: (input: UpdateTeamInput) => Promise<InferTeam<O>>;
+	deleteTeam: (input: DeleteTeamInput) => Promise<InferTeam<O>>;
+	listTeams: (input: OrganizationIdInput) => Promise<{ teams: InferTeam<O>[] }>;
 };
 
 type TeamServerAPI<O extends OrganizationOptions> = O["teams"] extends {
 	enabled: true;
 }
-	? {
-			createTeam: (input: CreateTeamInput) => Promise<InferTeam<O>>;
-			getTeam: (input: GetTeamInput) => Promise<InferTeam<O> | null>;
-			updateTeam: (input: UpdateTeamInput) => Promise<InferTeam<O>>;
-			deleteTeam: (input: DeleteTeamInput) => Promise<InferTeam<O>>;
-			listTeams: (
-				input: OrganizationIdInput,
-			) => Promise<{ teams: InferTeam<O>[] }>;
-		}
+	? OrganizationTeamOperationsAPI<O>
 	: {};
 
 type OrganizationServerBaseAPI<O extends OrganizationOptions> = {
@@ -176,6 +194,7 @@ type OrganizationServerBaseAPI<O extends OrganizationOptions> = {
 	) => Promise<InferOrganization<O> | null>;
 	getFullOrganization: (
 		input: OrganizationIdInput & {
+			isSlug?: boolean | undefined;
 			includeTeams?: boolean | undefined;
 			membersLimit?: number | undefined;
 		},
@@ -192,7 +211,7 @@ type OrganizationServerBaseAPI<O extends OrganizationOptions> = {
 	addMember: (input: AddMemberInput) => Promise<ServerMemberRow<O>>;
 	removeMember: (
 		input: RemoveMemberInput,
-	) => Promise<{ member: ServerMemberRow<O> }>;
+	) => Promise<{ member: ServerMemberWithUser<O> }>;
 	updateMember: (input: UpdateMemberInput) => Promise<ServerMemberRow<O>>;
 	listMembers: (input: ListMembersInput) => Promise<ListMembersResult<O>>;
 	createInvitation: (
@@ -233,7 +252,7 @@ function asHookOrganization<O extends OrganizationOptions>(
 }
 
 function asHookMember<O extends OrganizationOptions>(
-	member: ServerMemberRow<O> | InferMember<O>,
+	member: Member | ServerMemberRow<O> | InferMember<O>,
 ): ServerMember {
 	return member as ServerMember;
 }
@@ -317,9 +336,14 @@ async function requireOrganization<O extends OrganizationOptions>(
 	return organization;
 }
 
-export function createOrganizationServerAPI<O extends OrganizationOptions>(
+/**
+ * Request-independent organization operations. HTTP callers may provide actor
+ * context for option callbacks, while trusted server callers omit it.
+ */
+export function createOrganizationOperations<O extends OrganizationOptions>(
 	options: O,
 	run: OrganizationServerRun,
+	operationContext: OrganizationOperationContext = {},
 ): OrganizationServerAPI<O> {
 	const api: OrganizationServerBaseAPI<O> = {
 		createOrganization: async ({
@@ -441,6 +465,7 @@ export function createOrganizationServerAPI<O extends OrganizationOptions>(
 					team =
 						((await options.teams.defaultTeam?.customCreateDefaultTeam?.(
 							asHookOrganization(organization),
+							operationContext.endpointContext,
 						)) as InferTeam<O> | undefined) ||
 						(await adapter.createTeam(teamData));
 					await adapter.findOrCreateTeamMember({
@@ -465,7 +490,7 @@ export function createOrganizationServerAPI<O extends OrganizationOptions>(
 				}
 				return {
 					organization,
-					member,
+					member: member as unknown as ServerMemberRow<O>,
 					...(team ? { team } : {}),
 				};
 			});
@@ -478,6 +503,7 @@ export function createOrganizationServerAPI<O extends OrganizationOptions>(
 		},
 		getFullOrganization: async ({
 			organizationId,
+			isSlug,
 			includeTeams,
 			membersLimit,
 		}) => {
@@ -485,6 +511,7 @@ export function createOrganizationServerAPI<O extends OrganizationOptions>(
 				const adapter = getOrgAdapter<O>(ctx, options);
 				return (await adapter.findFullOrganization({
 					organizationId,
+					isSlug,
 					includeTeams,
 					membersLimit,
 				})) as ServerFullOrganization<O> | null;
@@ -691,7 +718,7 @@ export function createOrganizationServerAPI<O extends OrganizationOptions>(
 						{
 							teamId,
 							organizationId,
-							session: null,
+							session: operationContext.session ?? null,
 						},
 					);
 					if (maximumMembersPerTeam !== undefined) {
@@ -722,7 +749,7 @@ export function createOrganizationServerAPI<O extends OrganizationOptions>(
 						organization: asHookOrganization(organization),
 					});
 				}
-				return member;
+				return member as unknown as ServerMemberRow<O>;
 			});
 		},
 		removeMember: async ({ organizationId, memberId }) => {
@@ -813,7 +840,7 @@ export function createOrganizationServerAPI<O extends OrganizationOptions>(
 						organization: asHookOrganization(organization),
 					});
 				}
-				return updatedMember;
+				return updatedMember as unknown as ServerMemberRow<O>;
 			});
 		},
 		listMembers: async (input) => {
@@ -854,6 +881,25 @@ export function createOrganizationServerAPI<O extends OrganizationOptions>(
 					options,
 					organizationId,
 				);
+				const sendInvitation = async (invitation: InferInvitation<O>) => {
+					if (!options.sendInvitationEmail) return;
+					await ctx.runInBackgroundOrAwait(
+						options.sendInvitationEmail(
+							{
+								id: invitation.id,
+								role: invitation.role,
+								email: invitation.email.toLowerCase(),
+								organization: organization as Organization,
+								inviter: {
+									...(member as Member),
+									user: inviter,
+								},
+								invitation: invitation as Invitation,
+							},
+							operationContext.endpointContext?.request,
+						),
+					);
+				};
 				const roles = await validateRoles(ctx, options, organizationId, role);
 				const alreadyMember = await adapter.findMemberByEmail({
 					email: normalizedEmail,
@@ -880,8 +926,23 @@ export function createOrganizationServerAPI<O extends OrganizationOptions>(
 					);
 				}
 				if (pendingInvitations.length && resend) {
+					const existingInvitation = pendingInvitations[0]!;
+					const expiresAt = getDate(
+						options.invitationExpiresIn || 60 * 60 * 48,
+						"sec",
+					);
+					await ctx.adapter.update({
+						model: "invitation",
+						where: [{ field: "id", value: existingInvitation.id }],
+						update: { expiresAt },
+					});
+					const invitation = {
+						...existingInvitation,
+						expiresAt,
+					};
+					await sendInvitation(invitation);
 					return {
-						invitation: pendingInvitations[0]!,
+						invitation,
 					};
 				}
 				if (
@@ -944,7 +1005,7 @@ export function createOrganizationServerAPI<O extends OrganizationOptions>(
 						{
 							teamId: requestedTeamId,
 							organizationId,
-							session: null,
+							session: operationContext.session ?? null,
 						},
 					);
 					if (
@@ -987,19 +1048,7 @@ export function createOrganizationServerAPI<O extends OrganizationOptions>(
 					invitation: invitationData,
 					user: inviter,
 				});
-				if (options.sendInvitationEmail) {
-					await options.sendInvitationEmail({
-						id: invitation.id,
-						role: invitation.role,
-						email: invitation.email.toLowerCase(),
-						organization: organization as Organization,
-						inviter: {
-							...(member as Member),
-							user: inviter,
-						},
-						invitation: invitation as Invitation,
-					});
-				}
+				await sendInvitation(invitation);
 				if (options.organizationHooks?.afterCreateInvitation) {
 					await options.organizationHooks.afterCreateInvitation({
 						invitation: asHookInvitation(invitation),
@@ -1090,10 +1139,13 @@ export function createOrganizationServerAPI<O extends OrganizationOptions>(
 				const existingTeams = await adapter.listTeams(organizationId);
 				const maximum =
 					typeof options.teams?.maximumTeams === "function"
-						? await options.teams.maximumTeams({
-								organizationId,
-								session: null,
-							})
+						? await options.teams.maximumTeams(
+								{
+									organizationId,
+									session: operationContext.session ?? null,
+								},
+								operationContext.endpointContext,
+							)
 						: options.teams?.maximumTeams;
 				if (maximum && existingTeams.length >= maximum) {
 					throw APIError.from(
@@ -1106,6 +1158,7 @@ export function createOrganizationServerAPI<O extends OrganizationOptions>(
 					name,
 					organizationId,
 					createdAt: new Date(),
+					updatedAt: new Date(),
 				};
 				if (options.organizationHooks?.beforeCreateTeam) {
 					const response = await options.organizationHooks.beforeCreateTeam({
@@ -1145,10 +1198,15 @@ export function createOrganizationServerAPI<O extends OrganizationOptions>(
 				});
 			});
 		},
-		updateTeam: async ({ teamId, userId, data }: UpdateTeamInput) => {
+		updateTeam: async ({
+			teamId,
+			organizationId,
+			userId,
+			data,
+		}: UpdateTeamInput) => {
 			return await run(async (ctx) => {
 				const adapter = getOrgAdapter<O>(ctx, options);
-				const team = await adapter.findTeamById({ teamId });
+				const team = await adapter.findTeamById({ teamId, organizationId });
 				if (!team) {
 					throw APIError.from(
 						"BAD_REQUEST",
@@ -1193,10 +1251,10 @@ export function createOrganizationServerAPI<O extends OrganizationOptions>(
 				return updatedTeam;
 			});
 		},
-		deleteTeam: async ({ teamId, userId }: DeleteTeamInput) => {
+		deleteTeam: async ({ teamId, organizationId, userId }: DeleteTeamInput) => {
 			return await run(async (ctx) => {
 				const adapter = getOrgAdapter<O>(ctx, options);
-				const team = await adapter.findTeamById({ teamId });
+				const team = await adapter.findTeamById({ teamId, organizationId });
 				if (!team) {
 					throw APIError.from(
 						"BAD_REQUEST",
@@ -1226,7 +1284,29 @@ export function createOrganizationServerAPI<O extends OrganizationOptions>(
 						organization: asHookOrganization(organization),
 					});
 				}
-				await adapter.deleteTeam(teamId);
+				await runWithTransaction(ctx.adapter, async () => {
+					await adapter.deleteTeam(teamId);
+					const pendingInvitations = await adapter.findPendingInvitations({
+						organizationId: team.organizationId,
+					});
+					const transactionAdapter = await getCurrentAdapter(ctx.adapter);
+					for (const invitation of pendingInvitations) {
+						if (!("teamId" in invitation) || !invitation.teamId) continue;
+						const teamIds = (invitation.teamId as string).split(",");
+						if (!teamIds.includes(team.id)) continue;
+						const remainingTeamIds = teamIds.filter((id) => id !== team.id);
+						await transactionAdapter.update({
+							model: "invitation",
+							where: [{ field: "id", value: invitation.id }],
+							update: {
+								teamId:
+									remainingTeamIds.length > 0
+										? remainingTeamIds.join(",")
+										: null,
+							},
+						});
+					}
+				});
 				const deletedTeam = team;
 				if (options.organizationHooks?.afterDeleteTeam) {
 					await options.organizationHooks.afterDeleteTeam({
@@ -1248,4 +1328,35 @@ export function createOrganizationServerAPI<O extends OrganizationOptions>(
 			});
 		},
 	} as OrganizationServerAPI<O>;
+}
+
+export function createOrganizationServerAPI<O extends OrganizationOptions>(
+	options: O,
+	run: OrganizationServerRun,
+): OrganizationServerAPI<O> {
+	return createOrganizationOperations(options, run);
+}
+
+export function bindOrganizationOperations<O extends OrganizationOptions>(
+	options: O,
+	context: AuthContext,
+	operationContext: OrganizationOperationContext = {},
+): OrganizationServerAPI<O> {
+	return createOrganizationOperations(
+		options,
+		async (operation) => operation(context),
+		operationContext,
+	);
+}
+
+export function bindOrganizationTeamOperations<O extends OrganizationOptions>(
+	options: O,
+	context: AuthContext,
+	operationContext: OrganizationOperationContext = {},
+): OrganizationTeamOperationsAPI<O> {
+	return createOrganizationOperations(
+		options,
+		async (operation) => operation(context),
+		operationContext,
+	) as unknown as OrganizationTeamOperationsAPI<O>;
 }

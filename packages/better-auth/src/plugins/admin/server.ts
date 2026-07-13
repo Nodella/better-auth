@@ -17,6 +17,10 @@ type ServerRun = <Result>(
 	fn: (ctx: AuthContext) => Result | Promise<Result>,
 ) => Promise<Result>;
 
+type AdminOperationOptions = {
+	validateCreatePassword?: boolean | undefined;
+};
+
 type ServerStatus = {
 	status: true;
 };
@@ -139,8 +143,11 @@ async function setCredentialPassword(
 	ctx: AuthContext,
 	userId: string,
 	password: string,
+	validate = true,
 ) {
-	await validatePassword(ctx, password);
+	if (validate) {
+		await validatePassword(ctx, password);
+	}
 	await requireUser(ctx, userId);
 	const hashedPassword = await ctx.password.hash(password);
 	const accounts = await ctx.internalAdapter.findAccounts(userId);
@@ -186,10 +193,18 @@ export type AdminServerAPI<
 	setUserPassword: (input: SetUserPasswordInput) => Promise<ServerStatus>;
 };
 
-export function createAdminServerAPI<
+/**
+ * Request-independent admin operations. Callers provide the execution boundary
+ * that supplies the initialized auth context.
+ */
+export function createAdminOperations<
 	O extends AdminOptions,
 	Options extends BetterAuthOptions = BetterAuthOptions,
->(opts: O, run: ServerRun): AdminServerAPI<O, Options> {
+>(
+	opts: O,
+	run: ServerRun,
+	operationOptions: AdminOperationOptions = {},
+): AdminServerAPI<O, Options> {
 	return {
 		getUser: async ({ userId }) => {
 			return await run(async (ctx) => {
@@ -232,7 +247,12 @@ export function createAdminServerAPI<
 					);
 				}
 				if (password) {
-					await setCredentialPassword(ctx, user.id, password);
+					await setCredentialPassword(
+						ctx,
+						user.id,
+						password,
+						operationOptions.validateCreatePassword ?? true,
+					);
 				}
 				return {
 					user: parseUserOutput(ctx.options, user) as ServerUser<Options>,
@@ -414,4 +434,11 @@ export function createAdminServerAPI<
 			});
 		},
 	};
+}
+
+export function createAdminServerAPI<
+	O extends AdminOptions,
+	Options extends BetterAuthOptions = BetterAuthOptions,
+>(opts: O, run: ServerRun): AdminServerAPI<O, Options> {
+	return createAdminOperations<O, Options>(opts, run);
 }

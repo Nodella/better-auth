@@ -1,8 +1,4 @@
 import { createAuthEndpoint } from "@better-auth/core/api";
-import {
-	getCurrentAdapter,
-	runWithTransaction,
-} from "@better-auth/core/context";
 import { APIError } from "@better-auth/core/error";
 import * as z from "zod";
 import { getSessionFromCtx } from "../../../api";
@@ -16,6 +12,7 @@ import { ORGANIZATION_ERROR_CODES } from "../error-codes";
 import { hasPermission } from "../has-permission";
 import type { TeamMember } from "../schema";
 import { teamSchema } from "../schema";
+import { bindOrganizationTeamOperations } from "../server";
 import type { OrganizationOptions } from "../types";
 
 const teamBaseSchema = z.object({
@@ -145,72 +142,17 @@ export const createTeam = <O extends OrganizationOptions>(options: O) => {
 				}
 			}
 
-			const existingTeams = await adapter.listTeams(organizationId);
-			const maximum =
-				typeof ctx.context.orgOptions.teams?.maximumTeams === "function"
-					? await ctx.context.orgOptions.teams?.maximumTeams(
-							{
-								organizationId,
-								session,
-							},
-							ctx,
-						)
-					: ctx.context.orgOptions.teams?.maximumTeams;
-
-			const maxTeamsReached = maximum ? existingTeams.length >= maximum : false;
-			if (maxTeamsReached) {
-				throw APIError.from(
-					"BAD_REQUEST",
-					ORGANIZATION_ERROR_CODES.YOU_HAVE_REACHED_THE_MAXIMUM_NUMBER_OF_TEAMS,
-				);
-			}
 			const { name, organizationId: _, ...additionalFields } = ctx.body;
-
-			const organization = await adapter.findOrganizationById(organizationId);
-			if (!organization) {
-				throw APIError.from(
-					"BAD_REQUEST",
-					ORGANIZATION_ERROR_CODES.ORGANIZATION_NOT_FOUND,
-				);
-			}
-
-			let teamData = {
-				name,
+			const createdTeam = await bindOrganizationTeamOperations(
+				options,
+				ctx.context,
+				{ session, endpointContext: ctx },
+			).createTeam({
 				organizationId,
-				createdAt: new Date(),
-				updatedAt: new Date(),
-				...additionalFields,
-			};
-
-			// Run beforeCreateTeam hook
-			if (options?.organizationHooks?.beforeCreateTeam) {
-				const response = await options?.organizationHooks.beforeCreateTeam({
-					team: {
-						name,
-						organizationId,
-						...additionalFields,
-					},
-					user: session?.user,
-					organization,
-				});
-				if (response && typeof response === "object" && "data" in response) {
-					teamData = {
-						...teamData,
-						...response.data,
-					};
-				}
-			}
-
-			const createdTeam = await adapter.createTeam(teamData);
-
-			// Run afterCreateTeam hook
-			if (options?.organizationHooks?.afterCreateTeam) {
-				await options?.organizationHooks.afterCreateTeam({
-					team: createdTeam,
-					user: session?.user,
-					organization,
-				});
-			}
+				name,
+				userId: session?.user.id,
+				data: additionalFields,
+			});
 
 			return ctx.json(createdTeam);
 		},
@@ -309,86 +251,14 @@ export const removeTeam = <O extends OrganizationOptions>(options: O) =>
 					);
 				}
 			}
-			const team = await adapter.findTeamById({
+			await bindOrganizationTeamOperations(options, ctx.context, {
+				session,
+				endpointContext: ctx,
+			}).deleteTeam({
 				teamId: ctx.body.teamId,
 				organizationId,
+				userId: session?.user.id,
 			});
-			if (!team || team.organizationId !== organizationId) {
-				throw APIError.from(
-					"BAD_REQUEST",
-					ORGANIZATION_ERROR_CODES.TEAM_NOT_FOUND,
-				);
-			}
-
-			if (!ctx.context.orgOptions.teams?.allowRemovingAllTeams) {
-				const teams = await adapter.listTeams(organizationId);
-				if (teams.length <= 1) {
-					throw APIError.from(
-						"BAD_REQUEST",
-						ORGANIZATION_ERROR_CODES.UNABLE_TO_REMOVE_LAST_TEAM,
-					);
-				}
-			}
-
-			const organization = await adapter.findOrganizationById(organizationId);
-			if (!organization) {
-				throw APIError.from(
-					"BAD_REQUEST",
-					ORGANIZATION_ERROR_CODES.ORGANIZATION_NOT_FOUND,
-				);
-			}
-
-			// Run beforeDeleteTeam hook
-			if (options?.organizationHooks?.beforeDeleteTeam) {
-				await options?.organizationHooks.beforeDeleteTeam({
-					team,
-					user: session?.user,
-					organization,
-				});
-			}
-
-			await runWithTransaction(ctx.context.adapter, async () => {
-				await adapter.deleteTeam(team.id);
-
-				// Drop the removed team from pending invitations so they stay
-				// acceptable; an emptied list degrades to an org-level invitation.
-				const pendingInvitations = await adapter.findPendingInvitations({
-					organizationId,
-				});
-				const trx = await getCurrentAdapter(ctx.context.adapter);
-				for (const invitation of pendingInvitations) {
-					if (!("teamId" in invitation) || !invitation.teamId) {
-						continue;
-					}
-					const teamIds = (invitation.teamId as string).split(",");
-					if (!teamIds.includes(team.id)) {
-						continue;
-					}
-					const remainingTeamIds = teamIds.filter((id) => id !== team.id);
-					await trx.update({
-						model: "invitation",
-						where: [
-							{
-								field: "id",
-								value: invitation.id,
-							},
-						],
-						update: {
-							teamId:
-								remainingTeamIds.length > 0 ? remainingTeamIds.join(",") : null,
-						},
-					});
-				}
-			});
-
-			// Run afterDeleteTeam hook
-			if (options?.organizationHooks?.afterDeleteTeam) {
-				await options?.organizationHooks.afterDeleteTeam({
-					team,
-					user: session?.user,
-					organization,
-				});
-			}
 
 			return ctx.json({ message: "Team removed successfully." });
 		},
@@ -520,72 +390,17 @@ export const updateTeam = <O extends OrganizationOptions>(options: O) => {
 				);
 			}
 
-			const team = await adapter.findTeamById({
+			const { organizationId: _, ...data } = ctx.body.data;
+			const updatedTeam = await bindOrganizationTeamOperations(
+				options,
+				ctx.context,
+				{ session, endpointContext: ctx },
+			).updateTeam({
 				teamId: ctx.body.teamId,
 				organizationId,
+				userId: session.user.id,
+				data,
 			});
-
-			if (!team || team.organizationId !== organizationId) {
-				throw APIError.from(
-					"BAD_REQUEST",
-					ORGANIZATION_ERROR_CODES.TEAM_NOT_FOUND,
-				);
-			}
-
-			const { name, organizationId: __, ...additionalFields } = ctx.body.data;
-
-			const organization = await adapter.findOrganizationById(organizationId);
-			if (!organization) {
-				throw APIError.from(
-					"BAD_REQUEST",
-					ORGANIZATION_ERROR_CODES.ORGANIZATION_NOT_FOUND,
-				);
-			}
-
-			const updates = {
-				name,
-				...additionalFields,
-			};
-
-			// Run beforeUpdateTeam hook
-			if (options?.organizationHooks?.beforeUpdateTeam) {
-				const response = await options?.organizationHooks.beforeUpdateTeam({
-					team,
-					updates,
-					user: session.user,
-					organization,
-				});
-				if (response && typeof response === "object" && "data" in response) {
-					// Allow the hook to modify the updates
-					const modifiedUpdates = response.data;
-					const updatedTeam = await adapter.updateTeam(
-						team.id,
-						modifiedUpdates,
-					);
-
-					// Run afterUpdateTeam hook
-					if (options?.organizationHooks?.afterUpdateTeam) {
-						await options?.organizationHooks.afterUpdateTeam({
-							team: updatedTeam,
-							user: session.user,
-							organization,
-						});
-					}
-
-					return ctx.json(updatedTeam);
-				}
-			}
-
-			const updatedTeam = await adapter.updateTeam(team.id, updates);
-
-			// Run afterUpdateTeam hook
-			if (options?.organizationHooks?.afterUpdateTeam) {
-				await options?.organizationHooks.afterUpdateTeam({
-					team: updatedTeam,
-					user: session.user,
-					organization,
-				});
-			}
 
 			return ctx.json(updatedTeam);
 		},
@@ -690,7 +505,14 @@ export const listOrganizationTeams = <O extends OrganizationOptions>(
 					ORGANIZATION_ERROR_CODES.YOU_ARE_NOT_ALLOWED_TO_ACCESS_THIS_ORGANIZATION,
 				);
 			}
-			const teams = await adapter.listTeams(organizationId);
+			const { teams } = await bindOrganizationTeamOperations(
+				options,
+				ctx.context,
+				{
+					session,
+					endpointContext: ctx,
+				},
+			).listTeams({ organizationId });
 			return ctx.json(teams);
 		},
 	);
